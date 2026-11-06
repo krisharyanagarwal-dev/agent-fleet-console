@@ -40,36 +40,19 @@ async function loadAgents() {
     return;
   }
   try {
-    const res = await fetch(`https://api.github.com/repos/${ENGINE_REPO}/contents/agents?ref=${ENGINE_BRANCH}`);
+    const res = await fetch(`https://raw.githubusercontent.com/${ENGINE_REPO}/${ENGINE_BRANCH}/agents/index.json`);
     if (!res.ok) throw new Error(`agent index ${res.status}`);
-    const list = await res.json();
-    agents = list.filter(f => f.name.endsWith('.md')).map(f => {
-      const slug = f.name.replace(/\.md$/, '');
-      return { slug, name: slug.replace(/-[a-z]/g, m => m[1].toUpperCase()), download_url: f.download_url, path: f.path };
-    });
+    const index = await res.json();
+    agents = Object.entries(index).map(([slug, info]) => ({
+      slug, ...info
+    }));
     localStorage.setItem(AGENT_STORAGE_KEY, JSON.stringify(agents));
     localStorage.setItem(AGENT_STORAGE_TS, String(Date.now()));
     renderAgents();
-    // pre-fetch frontmatter for model info (best effort, capped)
-    fetchAgentModels().catch(() => {});
   } catch (e) {
     console.error('load agents', e);
-    document.getElementById('agentGrid').innerHTML = `<div class="empty" style="text-align:left">Unable to load agent index. Is ${ENGINE_REPO} public?</div>`;
+    document.getElementById('agentGrid').innerHTML = `<div class="empty" style="text-align:left">Unable to load agent index from ${ENGINE_REPO}@${ENGINE_BRANCH}</div>`;
   }
-}
-
-async function fetchAgentModels() {
-  // Read each agent .md frontmatter to extract model. Limit to first 40 to stay cheap.
-  for (const a of agents.slice(0, 40)) {
-    try {
-      const res = await fetch(a.download_url);
-      if (!res.ok) continue;
-      const text = await res.text();
-      const m = text.match(/^model:\s*(.+)$/m);
-      if (m) a.model = m[1].trim();
-    } catch { /* ignore */ }
-  }
-  renderAgents();
 }
 
 function renderAgents() {
