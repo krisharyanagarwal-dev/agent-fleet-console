@@ -145,10 +145,25 @@ jobs:
             exit 1
           fi
 
-          PAYLOAD=$(cat <<JSON
-          {"event_type":"console-task","client_payload":{"issue_number":$ISSUE_NUMBER,"agent":"$AGENT","title":"$(echo "$TITLE" | sed 's/"/\\"/g')","prompt":"$(echo "$BODY" | sed 's/"/\\"/g')","created_at":"$CREATED_AT","html_url":"$HTML_URL"}}
-JSON
-          )
+          PAYLOAD=$(jq -n \
+            --arg event_type "console-task" \
+            --argjson issue_number "$ISSUE_NUMBER" \
+            --arg agent "$AGENT" \
+            --arg title "$TITLE" \
+            --arg prompt "$BODY" \
+            --arg created_at "$CREATED_AT" \
+            --arg html_url "$HTML_URL" \
+            '{
+              event_type: $event_type,
+              client_payload: {
+                issue_number: $issue_number,
+                agent: $agent,
+                title: $title,
+                prompt: $prompt,
+                created_at: $created_at,
+                html_url: $html_url
+              }
+            }')
 
           HTTP_CODE=$(curl -s -o /tmp/dispatch.body -w "%{http_code}" -X POST "https://api.github.com/repos/$ENGINE_REPO/dispatches" \
             -H "Authorization: Bearer $GH_TOKEN" \
