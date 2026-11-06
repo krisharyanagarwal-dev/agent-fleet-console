@@ -1,6 +1,7 @@
 /* Agent Fleet Console — GitHub-powered dashboard */
-const CONSOLE_REPO = 'goodwearrinfo-aryan/agent-fleet-console';
+const CONSOLE_REPO = 'krisharyanagarwal-dev/agent-fleet-console';
 const ENGINE_REPO  = 'krisharyanagarwal-dev/openalice-fleet';
+const ENGINE_BRANCH = 'github-console-integration';
 
 let agents = [];
 let tasks = [];
@@ -39,7 +40,7 @@ async function loadAgents() {
     return;
   }
   try {
-    const res = await fetch(`https://api.github.com/repos/${ENGINE_REPO}/contents/agents?ref=main`);
+    const res = await fetch(`https://api.github.com/repos/${ENGINE_REPO}/contents/agents?ref=${ENGINE_BRANCH}`);
     if (!res.ok) throw new Error(`agent index ${res.status}`);
     const list = await res.json();
     agents = list.filter(f => f.name.endsWith('.md')).map(f => {

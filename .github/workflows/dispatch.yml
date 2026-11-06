@@ -14,6 +14,7 @@ concurrency:
 
 env:
   ENGINE_REPO: krisharyanagarwal-dev/openalice-fleet
+  CONSOLE_REPO: krisharyanagarwal-dev/agent-fleet-console
   MAX_BODY_CHARS: 8000
 
 jobs:
