@@ -30,15 +30,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       agent: ${{ steps.parse.outputs.agent }}
-      should_dispatch: ${{ steps.gate.outputs.should_dispatch }}
+      should_dispatch: ${{ steps.parse.outputs.should_dispatch }}
       issue_number: ${{ steps.parse.outputs.issue_number }}
     steps:
       - name: Get issue details
         id: get_issue
-        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -n "${{ github.event.inputs.issue_number }}" ]; then
-            # workflow_dispatch: fetch issue via API
             ISSUE_NUM="${{ github.event.inputs.issue_number }}"
             RESP=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUM}" 2>/dev/null || echo '{}')
             TITLE=$(echo "$RESP" | jq -r '.title // ""')
@@ -47,7 +47,6 @@ jobs:
             CREATED_AT=$(echo "$RESP" | jq -r '.created_at // ""')
             HTML_URL=$(echo "$RESP" | jq -r '.html_url // ""')
           else
-            # issues: opened event
             TITLE="${{ github.event.issue.title }}"
             BODY="${{ github.event.issue.body }}"
             AUTHOR="${{ github.event.issue.author_association }}"
@@ -55,7 +54,6 @@ jobs:
             CREATED_AT="${{ github.event.issue.created_at }}"
             HTML_URL="${{ github.event.issue.html_url }}"
           fi
-
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
           echo "body=$BODY" >> "$GITHUB_OUTPUT"
           echo "author=$AUTHOR" >> "$GITHUB_OUTPUT"
@@ -63,63 +61,73 @@ jobs:
           echo "created_at=$CREATED_AT" >> "$GITHUB_OUTPUT"
           echo "html_url=$HTML_URL" >> "$GITHUB_OUTPUT"
 
-      - name: Parse agent slug
+      - name: Parse + gate
         id: parse
-        shell: bash
+        env:
+          MAX_BODY_CHARS: ${{ env.MAX_BODY_CHARS }}
         run: |
           TITLE="${{ steps.get_issue.outputs.title }}"
           BODY="${{ steps.get_issue.outputs.body }}"
+          AUTHOR="${{ steps.get_issue.outputs.author }}"
+          ISSUE_NUM="${{ steps.get_issue.outputs.issue_number }}"
           BODY_LEN=${#BODY}
 
+          # Author gate
+          if [[ "$AUTHOR" != "OWNER" && "$AUTHOR" != "COLLABORATOR" && "$AUTHOR" != "MEMBER" ]]; then
+            echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
+            echo "agent=" >> "$GITHUB_OUTPUT"
+            echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+            echo "gate_reason=not_authorized" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Title must match agent/<slug>: <subject>
           if [[ ! "$TITLE" =~ ^agent/([a-z0-9-]{2,64}):\ .+ ]]; then
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             echo "agent=" >> "$GITHUB_OUTPUT"
-            echo "issue_number=${{ steps.get_issue.outputs.issue_number }}" >> "$GITHUB_OUTPUT"
+            echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+            echo "gate_reason=bad_title" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           AGENT="${BASH_REMATCH[1]}"
 
-          if [ "$BODY_LEN" -gt "${MAX_BODY_CHARS}" ]; then
+          # Body size bound
+          if [ "$BODY_LEN" -gt "$MAX_BODY_CHARS" ]; then
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             echo "agent=$AGENT" >> "$GITHUB_OUTPUT"
-            echo "issue_number=${{ steps.get_issue.outputs.issue_number }}" >> "$GITHUB_OUTPUT"
+            echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+            echo "gate_reason=body_too_large" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "agent=$AGENT" >> "$GITHUB_OUTPUT"
           echo "should_dispatch=true" >> "$GITHUB_OUTPUT"
-          echo "issue_number=${{ steps.get_issue.outputs.issue_number }}" >> "$GITHUB_OUTPUT"
-
-      - name: Author gate
-        id: gate
-        shell: bash
-        run: |
-          AUTHOR="${{ steps.get_issue.outputs.author }}"
-          if [[ "$AUTHOR" == "OWNER" || "$AUTHOR" == "COLLABORATOR" || "$AUTHOR" == "MEMBER" ]]; then
-            echo "ok=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=0" >> "$GITHUB_OUTPUT"
-          fi
+          echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "gate_reason=ok" >> "$GITHUB_OUTPUT"
 
       - name: Close non-gated issues
-        if: steps.gate.outputs.ok != '1'
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          repository: ${{ github.repository }}
-          comment-id: ${{ steps.parse.outputs.issue_number }}
-          body: |
-            ⛔ **Console task gated.**
-
-            Only repo members can dispatch agent tasks. Your issue has been closed.
-
-            To use the fleet, join the `krisharyanagarwal-dev/agent-fleet-console` repo as a collaborator, or run agents locally via `opencode run --agent <slug> "..."`.
-
-          edit-mode: replace
-      - name: Close non-gated issues (issue state)
-        if: steps.gate.outputs.ok != '1'
-        run: gh issue close ${{ steps.parse.outputs.issue_number }}
+        if: steps.parse.outputs.should_dispatch != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          REASON="${{ steps.parse.outputs.gate_reason }}"
+          case "$REASON" in
+            not_authorized)
+              MSG="⛔ **Console task gated.** Only repo members can dispatch agent tasks. Your issue has been closed."
+              ;;
+            bad_title)
+              MSG="⛔ **Invalid task title.** Title must match \`agent/<slug>: <subject>\` (e.g. \`agent/security-architect: Review this code\`)."
+              ;;
+            body_too_large)
+              MSG="⛔ **Task body too large.** Max ${{ env.MAX_BODY_CHARS }} characters."
+              ;;
+            *)
+              MSG="⛔ **Console task gated.** Your issue has been closed."
+              ;;
+          esac
+          gh api "repos/${{ github.repository }}/issues/${{ steps.parse.outputs.issue_number }}/comments" \
+            -X POST -f body="$MSG" >/dev/null 2>&1 || true
+          gh issue close "${{ steps.parse.outputs.issue_number }}" >/dev/null 2>&1 || true
 
   dispatch:
     name: Send to engine
