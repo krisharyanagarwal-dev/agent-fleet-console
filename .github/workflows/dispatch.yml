@@ -32,6 +32,10 @@ jobs:
       agent: ${{ steps.parse.outputs.agent }}
       should_dispatch: ${{ steps.parse.outputs.should_dispatch }}
       issue_number: ${{ steps.parse.outputs.issue_number }}
+      title: ${{ steps.get_issue.outputs.title }}
+      body: ${{ steps.get_issue.outputs.body }}
+      created_at: ${{ steps.get_issue.outputs.created_at }}
+      html_url: ${{ steps.get_issue.outputs.html_url }}
     steps:
       - name: Get issue details
         id: get_issue
@@ -142,10 +146,10 @@ jobs:
           ENGINE_REPO: ${{ env.ENGINE_REPO }}
           ISSUE_NUMBER: ${{ needs.gate.outputs.issue_number }}
           AGENT: ${{ needs.gate.outputs.agent }}
-          TITLE: ${{ steps.get_issue.outputs.title }}
-          BODY: ${{ steps.get_issue.outputs.body }}
-          CREATED_AT: ${{ steps.get_issue.outputs.created_at }}
-          HTML_URL: ${{ steps.get_issue.outputs.html_url }}
+          TITLE: ${{ needs.gate.outputs.title }}
+          BODY: ${{ needs.gate.outputs.body }}
+          CREATED_AT: ${{ needs.gate.outputs.created_at }}
+          HTML_URL: ${{ needs.gate.outputs.html_url }}
         run: |
           set -euo pipefail
           if [ -z "$GH_TOKEN" ]; then
