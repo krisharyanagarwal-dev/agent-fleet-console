@@ -76,7 +76,6 @@ jobs:
           ISSUE_NUM="${{ steps.get_issue.outputs.issue_number }}"
           BODY_LEN=${#BODY}
 
-          # Author gate
           if [[ "$AUTHOR" != "OWNER" && "$AUTHOR" != "COLLABORATOR" && "$AUTHOR" != "MEMBER" ]]; then
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             echo "agent=" >> "$GITHUB_OUTPUT"
@@ -85,7 +84,6 @@ jobs:
             exit 0
           fi
 
-          # Title must match agent/<slug>: <subject>
           if [[ ! "$TITLE" =~ ^agent/([a-z0-9-]{2,64}):\ .+ ]]; then
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             echo "agent=" >> "$GITHUB_OUTPUT"
@@ -95,7 +93,6 @@ jobs:
           fi
           AGENT="${BASH_REMATCH[1]}"
 
-          # Body size bound
           if [ "$BODY_LEN" -gt "$MAX_BODY_CHARS" ]; then
             echo "should_dispatch=false" >> "$GITHUB_OUTPUT"
             echo "agent=$AGENT" >> "$GITHUB_OUTPUT"
@@ -140,6 +137,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Add agent label to issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENT: ${{ needs.gate.outputs.agent }}
+          ISSUE_NUMBER: ${{ needs.gate.outputs.issue_number }}
+        run: |
+          gh issue edit "${ISSUE_NUMBER}" --repo "${{ github.repository }}" --add-label "agent:${AGENT}" >/dev/null 2>&1 || true
+          echo "::notice::Added agent:${AGENT} label to issue #${ISSUE_NUMBER}"
+
       - name: Write inbox to engine repo
         env:
           GH_TOKEN: ${{ secrets.CONSOLE_DISPATCH_TOKEN }}
@@ -181,7 +187,6 @@ jobs:
               html_url: $html_url
             }')
 
-          # Get current file SHA if it exists (for overwrite)
           SHA=$(curl -s "https://api.github.com/repos/$ENGINE_REPO/contents/${FILE}?ref=main" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
