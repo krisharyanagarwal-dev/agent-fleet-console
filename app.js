@@ -1,28 +1,23 @@
-/* Agent Fleet Console — GitHub-powered dashboard */
-const CONSOLE_REPO = 'goodwearrinfo-aryan/agent-fleet-console';
+/* Agent Fleet Console v3 — real-time chat UI for the GitHub-powered fleet */
+const CONSOLE_REPO = 'krisharyanagarwal-dev/agent-fleet-console';
 const ENGINE_REPO  = 'krisharyanagarwal-dev/openalice-fleet';
+const ENGINE_BRANCH = 'github-console-integration';
 
 let agents = [];
-let tasks = [];
-let etag = null;
-let selectedAgent = null;
+let currentAgent = null;
+let currentTask = null;
 let pollTimer = null;
+let messagePollTimer = null;
 
-const AGENT_STORAGE_KEY = 'fleet-agents';
-const AGENT_STORAGE_TS  = 'fleet-agents-ts';
-const AGENT_TTL_MS = 10 * 60 * 1000; // cache agent list 10 min
+const AGENT_STORAGE_KEY = 'fleet-agents-v3';
+const AGENT_STORAGE_TS  = 'fleet-agents-v3-ts';
+const AGENT_TTL_MS = 10 * 60 * 1000;
 
-function el(tag, cls, html) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (html !== undefined) e.innerHTML = html;
-  return e;
-}
-
+function $(sel) { return document.querySelector(sel); }
+function $$(sel) { return document.querySelectorAll(sel); }
 function escapeHtml(s) {
   const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
 }
-
 function fmtDate(iso) {
   if (!iso) return '—';
   try { return new Date(iso).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}); }
@@ -36,165 +31,265 @@ async function loadAgents() {
   if (cached && Date.now() - ts < AGENT_TTL_MS) {
     agents = JSON.parse(cached);
     renderAgents();
+    updateCounts();
     return;
   }
+  let index = null;
   try {
-    const res = await fetch(`https://api.github.com/repos/${ENGINE_REPO}/contents/agents?ref=main`);
-    if (!res.ok) throw new Error(`agent index ${res.status}`);
-    const list = await res.json();
-    agents = list.filter(f => f.name.endsWith('.md')).map(f => {
-      const slug = f.name.replace(/\.md$/, '');
-      return { slug, name: slug.replace(/-[a-z]/g, m => m[1].toUpperCase()), download_url: f.download_url, path: f.path };
-    });
-    localStorage.setItem(AGENT_STORAGE_KEY, JSON.stringify(agents));
-    localStorage.setItem(AGENT_STORAGE_TS, String(Date.now()));
-    renderAgents();
-    // pre-fetch frontmatter for model info (best effort, capped)
-    fetchAgentModels().catch(() => {});
-  } catch (e) {
-    console.error('load agents', e);
-    document.getElementById('agentGrid').innerHTML = `<div class="empty" style="text-align:left">Unable to load agent index. Is ${ENGINE_REPO} public?</div>`;
+    const res = await fetch(`https://raw.githubusercontent.com/${ENGINE_REPO}/${ENGINE_BRANCH}/agents/index.json`, { cache: 'no-cache' });
+    if (res.ok) index = await res.json();
+  } catch { /* fall through */ }
+  if (!index) {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${ENGINE_REPO}/contents/agents?ref=${ENGINE_BRANCH}&per_page=1000`, { cache: 'no-cache' });
+      if (res.ok) {
+        const list = await res.json();
+        index = {};
+        for (const f of list) {
+          if (f.name.endsWith('.md')) {
+            const slug = f.name.replace(/\.md$/, '');
+            index[slug] = { name: slug.replace(/-[a-z]/g, m => m[1].toUpperCase()), model: '—', pool: 'unknown', description: '' };
+          }
+        }
+      }
+    } catch (e) {
+      console.error('load agents', e);
+      $('#agentGrid').innerHTML = `<div class="empty">Unable to load agent index.</div>`;
+      return;
+    }
   }
+  agents = Object.entries(index).map(([slug, info]) => ({
+    slug, ...info
+  }));
+  localStorage.setItem(AGENT_STORAGE_KEY, JSON.stringify(agents));
+  localStorage.setItem(AGENT_STORAGE_TS, String(Date.now()));
+  renderAgents();
+  updateCounts();
 }
 
-async function fetchAgentModels() {
-  // Read each agent .md frontmatter to extract model. Limit to first 40 to stay cheap.
-  for (const a of agents.slice(0, 40)) {
-    try {
-      const res = await fetch(a.download_url);
-      if (!res.ok) continue;
-      const text = await res.text();
-      const m = text.match(/^model:\s*(.+)$/m);
-      if (m) a.model = m[1].trim();
-    } catch { /* ignore */ }
-  }
-  renderAgents();
+function providerFromPool(pool) {
+  if (pool.includes('nvidia')) return 'NVIDIA';
+  if (pool === 'google') return 'Google';
+  if (pool === 'groq') return 'Groq';
+  if (pool === 'openrouter') return 'OpenRouter';
+  if (pool === 'cerebras') return 'Cerebras';
+  return 'Other';
+}
+function providerColorClass(pool) {
+  const p = providerFromPool(pool).toLowerCase();
+  return `provider-${p}`;
 }
 
 function renderAgents() {
-  const q = document.getElementById('agentSearch').value.toLowerCase();
-  const grid = document.getElementById('agentGrid');
-  const filtered = agents.filter(a => a.name.toLowerCase().includes(q) || a.slug.toLowerCase().includes(q));
+  const q = $('#agentSearch').value.toLowerCase();
+  const activeFilter = $$('.chip.active')[0]?.dataset.filter || 'all';
+  const grid = $('#agentGrid');
+  const filtered = agents.filter(a => {
+    const matchQ = a.name.toLowerCase().includes(q) || a.slug.toLowerCase().includes(q);
+    const matchF = activeFilter === 'all' || providerFromPool(a.pool).toLowerCase() === activeFilter;
+    return matchQ && matchF;
+  });
   grid.innerHTML = filtered.map(a => {
-    const sel = selectedAgent === a.slug ? ' selected' : '';
+    const sel = currentAgent === a.slug ? ' selected' : '';
+    const provCls = providerColorClass(a.pool);
     return `
       <div class="agent-card${sel}" onclick="selectAgent('${escapeHtml(a.slug)}')">
         <div class="agent-name">${escapeHtml(a.name)}</div>
-        <div class="agent-model">${escapeHtml(a.model || '—')}</div>
-        <div class="agent-desc">${escapeHtml(a.desc || 'OpenCode subagent')}</div>
+        <div class="agent-model ${provCls}">${escapeHtml(a.model)}</div>
+        <div class="agent-provider">${escapeHtml(providerFromPool(a.pool))}</div>
+        <div class="agent-desc">${escapeHtml(a.description || 'OpenCode subagent')}</div>
       </div>
     `;
   }).join('');
 }
 
 window.selectAgent = function(slug) {
-  selectedAgent = slug;
-  renderAgents();
+  currentAgent = slug;
   const agent = agents.find(a => a.slug === slug);
-  if (agent) document.getElementById('taskAgent').value = slug;
+  renderAgents();
+  $('#panelTitle').textContent = agent ? agent.name : 'Select an Agent';
+  $('#agentStatus').textContent = agent ? `Model: ${agent.model} · Pool: ${agent.pool}` : '—';
+  $('#agentStatus').className = 'chip status-badge';
+  const empty = $('#emptyState');
+  const chat = $('#chatArea');
+  const input = $('#inputArea');
+  if (agent) {
+    empty.style.display = 'none';
+    chat.style.display = 'flex';
+    input.style.display = 'block';
+    $('#messageInput').focus();
+    loadTaskForAgent(slug);
+  } else {
+    empty.style.display = 'flex';
+    chat.style.display = 'none';
+    input.style.display = 'none';
+  }
 };
 
-// ---------------- Tasks (GitHub Issues) ----------------
-async function loadTasks() {
+function updateCounts() {
+  $('#fleetStats').textContent = `${agents.length} agents`;
+}
+
+// ---------------- Tasks ----------------
+async function loadTaskForAgent(slug) {
   try {
-    const headers = {};
-    if (etag) headers['If-None-Match'] = etag;
-    const res = await fetch(`https://api.github.com/repos/${CONSOLE_REPO}/issues?state=all&per_page=100&sort=created&direction=desc`, { headers });
-    if (res.status === 304) return;
-    etag = res.headers.get('etag');
+    const res = await fetch(`https://api.github.com/repos/${CONSOLE_REPO}/issues?state=all&per_page=100&sort=updated&direction=desc`, { cache: 'no-cache' });
+    if (!res.ok) return;
     const issues = await res.json();
-    // filter only agent tasks (title starts with "agent/")
-    tasks = issues.filter(i => /^agent\//.test(i.title || '')).map(i => ({
-      number: i.number,
-      title: i.title,
-      agent: (i.title.match(/^agent\/([^:]+):/) || [])[1] || 'unknown',
-      body: i.body || '',
-      state: i.state,
-      created_at: i.created_at,
-      updated_at: i.updated_at,
-      html_url: i.html_url,
-      comments: i.comments || 0,
-    }));
-    renderTasks();
-  } catch (e) {
-    console.error('load tasks', e);
-  }
+    const agentIssues = issues.filter(i => /^agent\//.test(i.title || ''));
+    const match = agentIssues.find(i => {
+      const m = i.title.match(/^agent\/([^:]+):/);
+      return m && m[1] === slug;
+    });
+    if (match) {
+      currentTask = { number: match.number, agent: slug, html_url: match.html_url, title: match.title, body: match.body || '', state: match.state };
+      renderTask(match);
+      startMessagePoll(match.number);
+    } else {
+      currentTask = null;
+      $('#messages').innerHTML = `<div class="empty-state" style="height:auto;padding:1rem"><div class="empty-icon">📭</div><h3 style="font-size:1rem;margin-bottom:0.25rem">No tasks yet</h3><p style="font-size:0.8rem">Send a message to create the first task for ${slug}.</p></div>`;
+    }
+  } catch (e) { console.error('load task', e); }
 }
 
-function renderTasks() {
-  const feed = document.getElementById('feed');
-  const count = document.getElementById('panelCount');
-  count.textContent = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
-  if (tasks.length === 0) {
-    feed.innerHTML = `<div class="empty"><span>No tasks yet</span><p class="hint">Create a task from an agent card to start. Every issue is a task; every comment is an agent result.</p></div>`;
-    return;
-  }
-  feed.innerHTML = tasks.map(t => `
-    <div class="task">
-      <div class="task-header">
-        <span class="task-id">#${t.number}</span>
-        <span class="task-agent">${escapeHtml(t.agent)}</span>
-      </div>
-      <div class="task-title">${escapeHtml(t.title.replace(/^agent\/[^:]+:\s*/, ''))}</div>
-      <div class="task-body">${escapeHtml(t.body.slice(0, 400))}${t.body.length > 400 ? '…' : ''}</div>
-      <div class="task-meta">
-        <span class="status ${t.state}">${t.state}</span>
-        <span>created ${fmtDate(t.created_at)}</span>
-        <span>${t.comments} comment${t.comments === 1 ? '' : 's'}</span>
-      </div>
-      <div class="task-result">${renderResultPlaceholder(t)}</div>
-    </div>
-  `).join('');
-}
-
-function renderResultPlaceholder(t) {
-  // If there's a latest comment, show it. Otherwise empty.
-  return `<div class="task-result empty-result">No agent result yet. The worker will post here when it completes.</div>`;
-}
-
-// ---------------- Dialog ----------------
-const dialog = document.getElementById('taskDialog');
-const form = document.getElementById('taskForm');
-const agentSelect = document.getElementById('taskAgent');
-
-function openDialog() {
-  agentSelect.innerHTML = agents.map(a => `<option value="${escapeHtml(a.slug)}">${escapeHtml(a.name)} — ${escapeHtml(a.model || '—')}</option>`).join('');
-  dialog.showModal();
-}
-function closeDialog() { dialog.close(); }
-document.getElementById('newTaskBtn').onclick = openDialog;
-document.getElementById('closeDialog').onclick = closeDialog;
-document.getElementById('cancelDialog').onclick = closeDialog;
-dialog.addEventListener('click', e => { if (e.target === dialog) closeDialog(); });
-
-form.onsubmit = async (e) => {
-  e.preventDefault();
-  const btn = document.getElementById('submitTask');
-  const orig = btn.textContent;
-  btn.textContent = 'Creating…'; btn.disabled = true;
+async function fetchComments(issueNumber) {
   try {
-    const subject = document.getElementById('taskSubject').value.trim();
-    const prompt = document.getElementById('taskPrompt').value.trim();
-    const agent = agentSelect.value;
-    const title = `agent/${agent}: ${subject}`;
-    const body = prompt;
-    const url = `https://github.com/${CONSOLE_REPO}/issues/new`;
-    const params = new URLSearchParams({ title, body, labels: `agent:${agent}` });
-    // Open prefilled issue in new tab (no token needed in browser)
-    window.open(`${url}?${params.toString()}`, '_blank');
-    closeDialog();
-    form.reset();
-    // Poll for the new issue shortly
-    setTimeout(loadTasks, 2500);
+    const res = await fetch(`https://api.github.com/repos/${CONSOLE_REPO}/issues/${issueNumber}/comments?per_page=50`, { cache: 'no-cache' });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch { return []; }
+}
+
+function renderTask(issue) {
+  const messages = $('#messages');
+  let html = `
+    <div class="message me">
+      <div class="message-content">${escapeHtml(issue.body)}</div>
+      <div class="message-meta"><span>You</span><span>${fmtDate(issue.created_at)}</span></div>
+    </div>
+  `;
+  if (issue.comments > 0) {
+    fetchComments(issue.number).then(comments => {
+      const agentComments = comments.filter(c => c.body && c.body.includes('Posted by OpenCode agent fleet worker'));
+      if (agentComments.length > 0) {
+        const latest = agentComments[agentComments.length - 1];
+        const parts = latest.body.split('\n---\n');
+        const resultBody = parts.length >= 3 ? parts[1] : latest.body;
+        const statusCls = latest.body.includes('status:done') ? 'result-ok' : 'result-fail';
+        const modelMatch = latest.body.match(/\*\*Model:\*\* ([^\n|]+)/);
+        const model = modelMatch ? modelMatch[1].trim() : '—';
+        const agentName = latest.body.match(/— (.+?) —/)?.[1] || 'Agent';
+        messages.innerHTML = html + `
+          <div class="message agent">
+            <span class="result-tag ${statusCls}">✅ ${agentName} · ${model}</span>
+            <div class="message-content">${escapeHtml(resultBody)}</div>
+            <div class="message-meta"><span>Agent result</span><span>${fmtDate(latest.updated_at)}</span></div>
+          </div>
+        `;
+      } else {
+        messages.innerHTML = html;
+      }
+      messages.scrollTop = messages.scrollHeight;
+    });
+  } else {
+    messages.innerHTML = html;
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function startMessagePoll(issueNumber) {
+  if (messagePollTimer) clearInterval(messagePollTimer);
+  messagePollTimer = setInterval(async () => {
+    try {
+      const comments = await fetchComments(issueNumber);
+      const agentComments = comments.filter(c => c.body && c.body.includes('Posted by OpenCode agent fleet worker'));
+      if (agentComments.length > 0) {
+        const latest = agentComments[agentComments.length - 1];
+        const parts = latest.body.split('\n---\n');
+        const resultBody = parts.length >= 3 ? parts[1] : latest.body;
+        const statusCls = latest.body.includes('status:done') ? 'result-ok' : 'result-fail';
+        const modelMatch = latest.body.match(/\*\*Model:\*\* ([^\n|]+)/);
+        const model = modelMatch ? modelMatch[1].trim() : '—';
+        const agentName = latest.body.match(/— (.+?) —/)?.[1] || 'Agent';
+        const existing = $$('.message.agent').length > 0;
+        if (!existing) {
+          const messages = $('#messages');
+          messages.innerHTML += `
+            <div class="message agent">
+              <span class="result-tag ${statusCls}">✅ ${agentName} · ${model}</span>
+              <div class="message-content">${escapeHtml(resultBody)}</div>
+              <div class="message-meta"><span>Agent result</span><span>${fmtDate(latest.updated_at)}</span></div>
+            </div>
+          `;
+          messages.scrollTop = messages.scrollHeight;
+        }
+        clearInterval(messagePollTimer);
+        messagePollTimer = null;
+      }
+    } catch { /* keep polling */ }
+  }, 5000);
+}
+
+// ---------------- Dispatch ----------------
+$('#chatForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const input = $('#messageInput');
+  const text = input.value.trim();
+  if (!text || !currentAgent) return;
+  const btn = $('#sendBtn');
+  const orig = btn.textContent;
+  btn.textContent = 'Creating issue…';
+  btn.disabled = true;
+  try {
+    const title = `agent/${currentAgent}: ${text.slice(0, 60)}${text.length > 60 ? '…' : ''}`;
+    const body = text;
+    const params = new URLSearchParams({ title, body, labels: `agent:${currentAgent}` });
+    window.open(`https://github.com/${CONSOLE_REPO}/issues/new?${params.toString()}`, '_blank');
+    input.value = '';
+    setTimeout(() => pollForNewIssue(currentAgent, text), 3000);
   } finally {
-    btn.textContent = orig; btn.disabled = false;
+    btn.textContent = orig;
+    btn.disabled = false;
   }
 };
 
-document.getElementById('agentSearch').oninput = renderAgents;
-document.getElementById('refreshBtn').onclick = () => { etag = null; loadTasks(); };
+async function pollForNewIssue(agent, prompt) {
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const res = await fetch(`https://api.github.com/repos/${CONSOLE_REPO}/issues?state=open&per_page=50&sort=created&direction=desc`, { cache: 'no-cache' });
+      if (!res.ok) continue;
+      const issues = await res.json();
+      const match = issues.find(i => {
+        const m = i.title.match(/^agent\/([^:]+):/);
+        return m && m[1] === agent && i.body === prompt;
+      });
+      if (match) {
+        currentTask = { number: match.number, agent, html_url: match.html_url, title: match.title, body: match.body, state: match.state };
+        renderTask(match);
+        startMessagePoll(match.number);
+        return;
+      }
+    } catch { /* retry */ }
+  }
+}
+
+// ---------------- UI wiring ----------------
+$('#agentSearch').oninput = renderAgents;
+$$('.chip').forEach(c => {
+  c.onclick = () => {
+    $$('.chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    renderAgents();
+  };
+});
+$('#refreshBtn').onclick = () => {
+  localStorage.removeItem(AGENT_STORAGE_KEY);
+  loadAgents();
+};
 
 // ---------------- Init ----------------
 loadAgents();
-loadTasks();
-pollTimer = setInterval(loadTasks, 15000);
+pollTimer = setInterval(() => {
+  if (currentTask) loadTaskForAgent(currentTask.agent);
+}, 15000);
