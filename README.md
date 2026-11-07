@@ -1,34 +1,40 @@
-# Agent Fleet Console
+# Agent Fleet Console v2
 
-Public GitHub Pages dashboard for the OpenCode agent fleet.
-
-- **Issues are tasks.** Every agent task is a GitHub issue titled `agent/<slug>: <subject>`.
-- **Comments are results.** The worker posts each agent's answer as a comment on the issue.
-- **No secrets in the browser.** The dashboard opens a prefilled issue; your GitHub account is the only credential used.
-- **Zero-cost.** GitHub Pages + Issues + anonymous API reads (conditional requests, 304-friendly).
-
-## Repos
-
-| Repo | Role | Visibility |
-|---|---|---|
-| `goodwearrinfo-aryan/agent-fleet-console` | UI + issue queue mirror | Public |
-| `krisharyanagarwal-dev/openalice-fleet` | Engine: agents, worker, provider API calls | Private |
-
-## Setup
-
-1. Create both repos (or use existing `openalice-fleet`).
-2. In the private engine repo, add these secrets:
-   - `CONSOLE_DISPATCH_TOKEN` — fine-grained PAT with `contents:write` on the console repo
-   - `NVIDIA_API_KEY` + fallback keys, `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`
-3. Enable Pages on the console repo (source: `gh-pages` branch, `/docs` folder).
-4. Start `services/worker_daemon.py` on the mini (or laptop hot standby).
+Real-time chat dashboard for the GitHub-powered OpenCode agent fleet (282 agents).
 
 ## How it works
 
+1. **Select an agent** from the left panel (282 agents, filterable by provider).
+2. **Type your task** in the chat input and press Enter.
+3. A **prefilled GitHub issue** opens in a new tab — click "Submit issue" to create it.
+4. The **fleet worker** picks up the issue, runs the agent via `opencode run --agent <slug> --model <model>`, and posts the result as a comment.
+5. The dashboard **polls every 5s** and renders the agent's reply in the chat view.
+
+## Repos
+
+| Repo | Role |
+|---|---|
+| `krisharyanagarwal-dev/agent-fleet-console` | Dashboard + issue queue (public, GitHub Pages) |
+| `krisharyanagarwal-dev/openalice-fleet` | Agents, worker daemon, provider API calls (private) |
+
+## Flow
+
 ```
-Dashboard → prefilled GitHub issue → dispatch.yml (routing only)
-  → repository_dispatch → engine inbox → worker_daemon.py
-    → task-ctl claim → opencode run → task-ctl complete
-    → outbox → publish.yml → comment on the issue
-  → dashboard polls Issues API (15 s)
+Dashboard chat → prefilled GitHub issue → dispatch.yml (Actions)
+  → engine inbox → worker_daemon.py → task-ctl claim → opencode run
+    → task-ctl complete → comment on issue → dashboard polls & renders
 ```
+
+## Setup
+
+1. Enable GitHub Pages on `agent-fleet-console` (source: `gh-pages` branch).
+2. Add `CONSOLE_DISPATCH_TOKEN` secret to the console repo (PAT with `contents:write` on the engine repo).
+3. Add `CONSOLE_DISPATCH_TOKEN` to the worker host env (`~/.config/openalice-fleet/fleet.env`).
+4. Start `services/worker_daemon.py` on the mini or laptop.
+
+## Why GitHub Issues as the queue
+
+- Issues are public, searchable, and version-controlled
+- Comments are the result channel — no separate result store
+- Labels (`agent:<slug>`, `status:done|failed|stalled`) give instant status
+- Zero infrastructure: GitHub hosts UI, queue, and history for free
